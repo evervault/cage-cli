@@ -294,14 +294,14 @@ mod tests {
 
         // Compare build measures as certs are generated on the fly to prevent expiry
         let expected_pcrs: PCRs = serde_json::from_str(r#"{
-            "PCR0": "9fe8e1525219b65a265f0ccb234f66fececfc5c761fe50bcbc3b1ac0e48f84dc4b0434a9a29f27d8aef57399e78b4124",
+            "PCR0": "04df1505cf8be30f9eb37d9b31e62f585655601b70fef3e197ae818322218d79ce06c503436f8f911bc059b31f86763b",
             "PCR1": "bcdf05fefccaa8e55bf2c8d6dee9e79bbff31e34bf28a99aa19e6b29c37ee80b214a414b7607236edf26fcb78654e63f",
-            "PCR2": "48ffa10dec685c5e43c2e37f7800d103d42b5d9cc2fe36fc7419f35950a089d0b251a3ee36a311c9718159f8e62f0cc9"
+            "PCR2": "a9862d27493410ab272a994181c14750091f60b11859fb92a011ac4d82e72d870d39e2503e44b3bb7a59f511f569e615"
         }"#).unwrap();
         assert_eq!(&eif_pcrs.pcr0, &expected_pcrs.pcr0);
         assert_eq!(&eif_pcrs.pcr1, &expected_pcrs.pcr1);
         assert_eq!(&eif_pcrs.pcr2, &expected_pcrs.pcr2);
-
+        
         // ensure temp output directory still exists after running function
         assert!(output_path.path().exists());
     }

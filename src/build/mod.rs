@@ -7,6 +7,7 @@ use crate::docker::error::DockerError;
 use crate::docker::parse::{Directive, DockerfileDecoder, Mode};
 use crate::docker::utils::verify_docker_is_running;
 use crate::enclave;
+use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -225,33 +226,35 @@ async fn process_dockerfile<R: AsyncRead + std::marker::Unpin>(
 
     let repro_time = r#"find $( ls / | grep -E -v "^(dev|mnt|proc|sys)$" ) -xdev | xargs touch --date="@0" --no-dereference || true"#.to_string();
 
-    let mut env_directives = vec![
-        // set cage name and app uuid as in enclave env vars
-        Directive::new_env("EV_CAGE_NAME", build_config.cage_name()),
-        Directive::new_env("CAGE_UUID", build_config.cage_uuid()),
-        Directive::new_env("EV_APP_UUID", build_config.app_uuid()),
-        Directive::new_env("EV_TEAM_UUID", build_config.team_uuid()),
-        Directive::new_env("DATA_PLANE_HEALTH_CHECKS", "true"),
-        Directive::new_env("EV_API_KEY_AUTH", &build_config.api_key_auth().to_string()),
-        Directive::new_env(
-            "EV_TRX_LOGGING_ENABLED",
-            &build_config.trx_logging_enabled().to_string(),
-        ),
-    ];
-
     let egress = build_config.clone().egress;
-    if egress.is_enabled() {
-        let ports = Directive::new_env("EGRESS_PORTS", &egress.clone().get_ports());
-        env_directives.push(ports);
-        let domains = Directive::new_env("EV_EGRESS_ALLOW_LIST", &egress.get_destinations());
-        env_directives.push(domains)
+
+    let egress_obj = if egress.is_enabled() {
+        json!({
+            "ports": &egress.clone().get_ports(),
+            "allowList": &egress.get_destinations()
+        })
+    } else {
+        json!({})
     };
+
+    let dataplane_info = json!({
+        "apiKeyAuth":  &build_config.api_key_auth().to_string(),
+        "trxLoggingEnabled": &build_config.trx_logging_enabled().to_string(),
+        "egress": egress_obj
+    })
+    .to_string();
+
+    let dataplane_env = format!(
+        "echo {} > /etc/dataplane-vars",
+        dataplane_info.replace("\"", "\\\"")
+    );
 
     let injected_directives = vec![
         // install dependencies
         Directive::new_run(format!("mkdir -p {INSTALLER_DIRECTORY}")),
         Directive::new_add(&installer_bundle_url, &installer_destination),
         Directive::new_run(format!("cd {INSTALLER_DIRECTORY} ; tar -xzf {installer_bundle} ; sh ./installer.sh ; rm {installer_bundle}")),
+        Directive::new_run(dataplane_env),
         // create user service directory
         Directive::new_run(format!("mkdir -p {USER_ENTRYPOINT_SERVICE_PATH}")),
         // add user service runner
@@ -277,9 +280,10 @@ async fn process_dockerfile<R: AsyncRead + std::marker::Unpin>(
             &[],
         )),
         Directive::new_run(repro_time),
-        // add entrypoint which starts the runit services
+        // Squash layers for reproducible builds
         Directive::new_from("scratch".to_string()),
         Directive::new_copy("--from=0 / /".to_string()),
+        // add entrypoint which starts the runit services
         Directive::new_entrypoint(
             Mode::Exec,
             vec!["/bootstrap".to_string(), "1>&2".to_string()],
@@ -290,7 +294,6 @@ async fn process_dockerfile<R: AsyncRead + std::marker::Unpin>(
     Ok([
         cleaned_instructions,
         injected_directives,
-        env_directives,
         start_up_directives,
     ]
     .concat())
@@ -369,19 +372,13 @@ RUN touch /hello-script;\
 RUN mkdir -p /opt/evervault
 ADD https://cage-build-assets.evervault.com/installer/abcdef.tar.gz /opt/evervault/runtime-dependencies.tar.gz
 RUN cd /opt/evervault ; tar -xzf runtime-dependencies.tar.gz ; sh ./installer.sh ; rm runtime-dependencies.tar.gz
+RUN echo {\"apiKeyAuth\":\"true\",\"egress\":{},\"trxLoggingEnabled\":\"true\"} > /etc/dataplane-vars
 RUN mkdir -p /etc/service/user-entrypoint
 RUN printf "#!/bin/sh\nsleep 5\necho \"Checking status of data-plane\"\nSVDIR=/etc/service sv check data-plane || exit 1\necho \"Data-plane up and running\"\nwhile ! grep -q \"EV_CAGE_INITIALIZED\" /etc/customer-env\n do echo \"Env not ready, sleeping user process for one second\"\n sleep 1\n done \n . /etc/customer-env\n\necho \"Booting user service...\"\ncd %s\nexec sh /hello-script\n" "$PWD"  > /etc/service/user-entrypoint/run && chmod +x /etc/service/user-entrypoint/run
 ADD https://cage-build-assets.evervault.com/runtime/0.0.0/data-plane/egress-disabled/tls-termination-enabled /opt/evervault/data-plane
 RUN chmod +x /opt/evervault/data-plane
 RUN mkdir -p /etc/service/data-plane
 RUN printf "#!/bin/sh\necho \"Booting Evervault data plane...\"\nexec /opt/evervault/data-plane\n" > /etc/service/data-plane/run && chmod +x /etc/service/data-plane/run
-ENV EV_CAGE_NAME=test
-ENV CAGE_UUID=1234
-ENV EV_APP_UUID=3241
-ENV EV_TEAM_UUID=teamid
-ENV DATA_PLANE_HEALTH_CHECKS=true
-ENV EV_API_KEY_AUTH=true
-ENV EV_TRX_LOGGING_ENABLED=true
 RUN printf "#!/bin/sh\nifconfig lo 127.0.0.1\n echo \"enclave.local\" > /etc/hostname \n echo \"127.0.0.1 enclave.local\" >> /etc/hosts \n hostname -F /etc/hostname \necho \"Booting enclave...\"\nexec runsvdir /etc/service\n" > /bootstrap && chmod +x /bootstrap
 RUN find $( ls / | grep -E -v "^(dev|mnt|proc|sys)$" ) -xdev | xargs touch --date="@0" --no-dereference || true
 FROM scratch
@@ -466,19 +463,13 @@ RUN touch /hello-script;\
 RUN mkdir -p /opt/evervault
 ADD https://cage-build-assets.evervault.com/installer/abcdef.tar.gz /opt/evervault/runtime-dependencies.tar.gz
 RUN cd /opt/evervault ; tar -xzf runtime-dependencies.tar.gz ; sh ./installer.sh ; rm runtime-dependencies.tar.gz
+RUN echo {\"apiKeyAuth\":\"true\",\"egress\":{},\"trxLoggingEnabled\":\"true\"} > /etc/dataplane-vars
 RUN mkdir -p /etc/service/user-entrypoint
 RUN printf "#!/bin/sh\nsleep 5\necho \"Checking status of data-plane\"\nSVDIR=/etc/service sv check data-plane || exit 1\necho \"Data-plane up and running\"\nwhile ! grep -q \"EV_CAGE_INITIALIZED\" /etc/customer-env\n do echo \"Env not ready, sleeping user process for one second\"\n sleep 1\n done \n . /etc/customer-env\n\necho \"Booting user service...\"\ncd %s\nexec sh /hello-script\n" "$PWD"  > /etc/service/user-entrypoint/run && chmod +x /etc/service/user-entrypoint/run
 ADD https://cage-build-assets.evervault.com/runtime/0.0.0/data-plane/egress-disabled/tls-termination-enabled /opt/evervault/data-plane
 RUN chmod +x /opt/evervault/data-plane
 RUN mkdir -p /etc/service/data-plane
 RUN printf "#!/bin/sh\necho \"Booting Evervault data plane...\"\nexec /opt/evervault/data-plane 3443\n" > /etc/service/data-plane/run && chmod +x /etc/service/data-plane/run
-ENV EV_CAGE_NAME=test
-ENV CAGE_UUID=1234
-ENV EV_APP_UUID=3241
-ENV EV_TEAM_UUID=teamid
-ENV DATA_PLANE_HEALTH_CHECKS=true
-ENV EV_API_KEY_AUTH=true
-ENV EV_TRX_LOGGING_ENABLED=true
 RUN printf "#!/bin/sh\nifconfig lo 127.0.0.1\n echo \"enclave.local\" > /etc/hostname \n echo \"127.0.0.1 enclave.local\" >> /etc/hosts \n hostname -F /etc/hostname \necho \"Booting enclave...\"\nexec runsvdir /etc/service\n" > /bootstrap && chmod +x /bootstrap
 RUN find $( ls / | grep -E -v "^(dev|mnt|proc|sys)$" ) -xdev | xargs touch --date="@0" --no-dereference || true
 FROM scratch

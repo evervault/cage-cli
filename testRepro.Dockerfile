@@ -10,13 +10,6 @@ ADD https://cage-build-assets.evervault.com/runtime/0.0.29/data-plane/egress-dis
 RUN chmod +x /opt/evervault/data-plane
 RUN mkdir -p /etc/service/data-plane
 RUN printf "#!/bin/sh\necho \"Booting Evervault data plane...\"\nexec /opt/evervault/data-plane 80\n" > /etc/service/data-plane/run && chmod +x /etc/service/data-plane/run
-ENV EV_CAGE_NAME=test-cage
-ENV CAGE_UUID=1234
-ENV EV_APP_UUID=4321
-ENV EV_TEAM_UUID=teamid
-ENV DATA_PLANE_HEALTH_CHECKS=true
-ENV EV_API_KEY_AUTH=true
-ENV EV_TRX_LOGGING_ENABLED=true
 RUN printf "#!/bin/sh\nifconfig lo 127.0.0.1\n echo \"enclave.local\" > /etc/hostname \n echo \"127.0.0.1 enclave.local\" >> /etc/hosts \n hostname -F /etc/hostname \necho \"Booting enclave...\"\nexec runsvdir /etc/service\n" > /bootstrap && chmod +x /bootstrap
 RUN find $( ls / | grep -E -v "^(dev|mnt|proc|sys)$" ) -xdev | xargs touch --date="@0" --no-dereference || true
 FROM scratch
