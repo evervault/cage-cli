@@ -1,15 +1,17 @@
+---
 name: Release Cage CLI version
 
 on:
-  push:
-    tags:
-      - "v*"
+  push
 
 env:
   RUST_BACKTRACE: 1
   WINDOWS_TARGET: x86_64-pc-windows-msvc
+  WINDOWS_ARM_TARGET: aarch64-pc-windows-msvc
   MACOS_TARGET: x86_64-apple-darwin
+  MACOS_ARM_TARGET: aarch64-apple-darwin
   LINUX_TARGET: x86_64-unknown-linux-musl
+  LINUX_ARM_TARGET: aarch64-unknown-linux-musl
   STAGE: production
 
   # Directories to target during release
@@ -23,234 +25,178 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
     steps:
       - id: get-version
+        # run: |
+        #   echo "using version tag ${GITHUB_REF:11}"
+        #   echo "version=${GITHUB_REF:11}" >> "$GITHUB_OUTPUT"
         run: |
           echo "using version tag ${GITHUB_REF:11}"
-          echo ::set-output name=version::${GITHUB_REF:11}
-                
-  compile-ubuntu:
-    runs-on: ubuntu-latest
+          echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+
+  compile-cli-for-target:
     needs: get-version
-    steps:
-      - uses: actions/checkout@v2
+    strategy:
+      matrix:
+        target: [ "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc" ]
+        include:
+          # Set default for musl and vcpkgrs_dynamic, will be overridden for specific targets
+          - musl: false
+            vcpkgrs_dynamic: 0
+            musl_suffix: ""
+          - target: x86_64-unknown-linux-musl
+            release_dir: "linux-x86"
+            artifact_name: "linux-x86"
+            platform: "ubuntu-latest"
+            musl: true
+            profile: "minimal"
+          - target: aarch64-unknown-linux-musl
+            release_dir: "linux-arm64"
+            artifact_name: "linux-arm64"
+            platform: "ubuntu-latest"
+            musl: true
+            musl_suffix: ":arm64"
+            profile: "minimal"
+          - target: x86_64-apple-darwin
+            release_dir: "apple-x86"
+            artifact_name: "apple-x86"
+            platform: "macos-latest"
+          - target: aarch64-apple-darwin
+            release_dir: "apple-arm64"
+            artifact_name: "apple-arm64"
+            platform: "macos-latest"
+          - target: x86_64-pc-windows-msvc
+            release_dir: "windows-x86"
+            artifact_name: "windows-x86"
+            platform: "windows-latest"
+            vcpkgrs_dynamic: 1
+          - target: aarch64-pc-windows-msvc
+            release_dir: "windows-arm64"
+            artifact_name: "windows-arm64"
+            platform: "windows-latest"
+            vcpkgrs_dynamic: 1
+    uses: ./.github/workflows/compile-cli-for-target.yml
+    with:
+      target: ${{ matrix.target }}
+      release_dir: ${{ matrix.release_dir }}
+      artifact_name: ${{ matrix.artifact_name }}
+      platform: ${{ matrix.platform }}
+      version: ${{ needs.get-version.outputs.version }}
+      musl: ${{ matrix.musl }}
+      musl_suffix: ${{ matrix.musl_suffix }}
+      vcpkgrs_dynamic: ${{ matrix.vcpkgrs_dynamic }}
+    secrets: inherit
 
-      - name: Install musl-tools
-        run: sudo apt-get install musl-tools
-
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: nightly
-          override: true
-          target: ${{ env.LINUX_TARGET }}
-
-      - name: Download cached dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-            shared-key: "linux-cross-builds"
-
-      - name: Install cross
-        run: cargo install cross
-
-      - name: Inject Version
-        run: |
-          sh ./scripts/insert-cli-version.sh ${{ needs.get-version.outputs.version }}
-
-      - name: Build and Compress cli
-        run: |
-          mkdir ${{ env.BIN_DIR }}
-          mkdir ${{ env.RELEASE_DIR }}
-          cross build --release --target ${{ env.LINUX_TARGET }} -Z registry-auth
-          mv ./target/${{ env.LINUX_TARGET }}/release/ev-cage ./${{ env.BIN_DIR }}/ev-cage
-          7z a -ttar -so -an ./${{ env.BIN_DIR }} | 7z a -si ./${{ env.RELEASE_DIR }}/ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-        env:
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_INDEX: ${{ secrets.RUST_CRYPTO_REGISTRY }}
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN: ${{ secrets.CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN }}
-          CARGO_HOME: ${{ github.workspace }}/.cargo
-
-      - name: Upload as artifact
-        uses: actions/upload-artifact@v2
-        with:
-          name: linux
-          path: ./${{ env.RELEASE_DIR }}
-
-  compile-macos:
-    runs-on: macos-latest
-    needs: get-version
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Inject Version
-        run: |
-          sh ./scripts/insert-cli-version.sh ${{ needs.get-version.outputs.version }}
-
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: ${{ env.MACOS_TARGET }}
-          override: true
+  # release-cli-version:
+  #   needs: [ get-version, compile-linux-x86, compile-linux-arm64, compile-macos-x86, compile-macos-arm64, compile-windows-x86, compile-windows-arm64 ]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Create Release
+  #       id: create-release
+  #       uses: actions/create-release@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         tag_name: ${{ needs.get-version.outputs.version }}
+  #         release_name: ${{ needs.get-version.outputs.version }}
       
-      - name: Download cached dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-            shared-key: "macos-cross-builds"
+  #     - name: Download MacOS x86 Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: macos-x86
 
-      - name: Build CLI MacOs Target
-        run: |
-          cargo install cross
-          cross build --release --target ${{ env.MACOS_TARGET }} -Z registry-auth
-        env:
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_INDEX: ${{ secrets.RUST_CRYPTO_REGISTRY }}
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN: ${{ secrets.CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN }}
+  #     - name: Download MacOS Arm Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: macos-arm64
+      
+  #     - uses: cloudposse/github-action-matrix-outputs-read@v0.1.1
+  #       id: read-linux
+  #       with:
+  #         matrix-step-name: compile-ubuntu
 
-      - name: Compress macos binary
-        uses: svenstaro/upx-action@v2
-        with:
-          file: target/${{env.MACOS_TARGET}}/release/ev-cage
-          args: --best --lzma
-          strip: true
+  #     - name: Download Linux x86 Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: linux-x86
 
-      - name: Install 7z cli
-        run: brew install p7zip
+  #     - name: Download Linux Arm Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: linux-arm64
 
-      - name: Setup directories
-        run: |
-          mkdir ${{ env.BIN_DIR }}
-          mkdir ${{ env.RELEASE_DIR }}
+  #     - name: Download Windows x86 Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: windows-x86
 
-      - name: Compress binary
-        run: |
-          mv target/${{env.MACOS_TARGET}}/release/ev-cage ${{ env.BIN_DIR }}/ev-cage
-          7z a -ttar -so -an ./${{ env.BIN_DIR }} | 7z a -si ${{ env.RELEASE_DIR }}/ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #     - name: Download Windows Arm Artifacts
+  #       uses: actions/download-artifact@v1
+  #       with:
+  #         name: windows-arm64
 
-      - name: Upload as artifact
-        uses: actions/upload-artifact@v2
-        with:
-          name: macos
-          path: ./${{ env.RELEASE_DIR }}
+  #     - name: Upload Linux x86 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./linux-x86/ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
-  compile-windows:
-    runs-on: windows-latest
-    needs: get-version
-    env:
-      VCPKGRS_DYNAMIC: 1
-    steps:
-      - uses: actions/checkout@v2
+  #     - name: Upload Linux arm64 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./linux-arm64/ev-cage-${{ env.LINUX_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.LINUX_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
-      - name: Install Rust
-        run: rustup update --no-self-update stable && rustup default stable
+  #     - name: Upload MacOS x86 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./macos-x86/ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: ${{ env.WINDOWS_TARGET }}
-          override: true
+  #     - name: Upload MacOS arm64 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./macos-arm64/ev-cage-${{ env.MACOS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.MACOS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
-      - name: Inject Version
-        run: |
-          sh ./scripts/insert-cli-version.sh ${{ needs.get-version.outputs.version }}
+  #     - name: Upload Windows x86 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./windows-x86/ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
-      - name: Download cached dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-            shared-key: "windows-cross-builds"
-
-      - name: Fetch dependencies
-        run: cargo fetch -Z registry-auth
-        env:
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_INDEX: ${{ secrets.RUST_CRYPTO_REGISTRY }}
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN: ${{ secrets.CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN }}
-
-      - name: Build CLI for Windows
-        run: |
-          cargo install cross
-          cross build --release --target ${{ env.WINDOWS_TARGET }} -Z registry-auth
-        env:
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_INDEX: ${{ secrets.RUST_CRYPTO_REGISTRY }}
-          CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN: ${{ secrets.CARGO_REGISTRIES_EVERVAULT_RUST_LIBRARIES_TOKEN }}
-
-      - name: Setup directories
-        shell: bash
-        run: |
-          mkdir ${{ env.BIN_DIR }}
-          mkdir ${{ env.RELEASE_DIR }}
-
-      - name: Compress
-        shell: bash
-        run: |
-          mv target/${{ env.WINDOWS_TARGET }}/release/ev-cage.exe ${{ env.BIN_DIR }}/ev-cage.exe
-          7z a -ttar -so -an ./${{ env.BIN_DIR }} | 7z a -si ./${{ env.RELEASE_DIR }}/ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-
-      - name: Upload as artifact
-        uses: actions/upload-artifact@v2
-        with:
-          name: windows
-          path: ./${{ env.RELEASE_DIR }}
-
-  release-cli-version:
-    needs: [ get-version, compile-ubuntu, compile-macos, compile-windows ]
-    runs-on: ubuntu-latest
-    steps:
-
-      - name: Create Release
-        id: create-release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.get-version.outputs.version }}
-          release_name: ${{ needs.get-version.outputs.version }}
-
-      - name: Download MacOS Artifacts
-        uses: actions/download-artifact@v1
-        with:
-          name: macos
-
-      - name: Download Linux Artifacts
-        uses: actions/download-artifact@v1
-        with:
-          name: linux
-
-      - name: Download Windows Artifacts
-        uses: actions/download-artifact@v1
-        with:
-          name: windows
-
-      - name: Upload Linux Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: ./linux/ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-          asset_content_type: application/gzip
-          asset_name: ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-
-      - name: Upload MacOS Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: ./macos/ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-          asset_content_type: application/gzip
-          asset_name: ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-
-      - name: Upload Windows Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: ./windows/ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
-          asset_content_type: application/gzip
-          asset_name: ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #     - name: Upload Windows arm64 Release
+  #       uses: actions/upload-release-asset@v1
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #       with:
+  #         upload_url: ${{ steps.create-release.outputs.upload_url }}
+  #         asset_path: ./windows-arm64/ev-cage-${{ env.WINDOWS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
+  #         asset_content_type: application/gzip
+  #         asset_name: ev-cage-${{ env.WINDOWS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz
 
   upload-artifacts-to-s3:
-    needs: [ get-version , compile-ubuntu, compile-macos, compile-windows ]
+    needs: [ get-version, compile-cli-for-target ]
     runs-on: ubuntu-latest
     steps:
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
@@ -258,40 +204,73 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Download MacOS Artifacts
+      - name: Download MacOS x86 Artifacts
         uses: actions/download-artifact@v1
         with:
-          name: macos
+          name: macos-x86
 
-      - name: Download Linux Artifacts
+      - name: Download MacOS arm64 Artifacts
         uses: actions/download-artifact@v1
         with:
-          name: linux
+          name: macos-arm64
 
-      - name: Download Windows Artifacts
+      - name: Download Linux x86 Artifacts
         uses: actions/download-artifact@v1
         with:
-          name: windows
+          name: linux-x86
 
-      - name: Upload Windows CLI to S3
-        run: |
-          aws s3 cp ./windows/ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.WINDOWS_TARGET }}/ev-cage.tar.gz
+      - name: Download Linux arm64 Artifacts
+        uses: actions/download-artifact@v1
+        with:
+          name: linux-arm64
 
-      - name: Upload MacOS CLI to S3
-        run: |
-          aws s3 cp ./macos/ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.MACOS_TARGET }}/ev-cage.tar.gz
+      - name: Download Windows x86 Artifacts
+        uses: actions/download-artifact@v1
+        with:
+          name: windows-x86
 
-      - name: Upload Ubuntu CLI to S3
-        run: |
-          aws s3 cp ./linux/ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.LINUX_TARGET }}/ev-cage.tar.gz
+      - name: Download Windows arm64 Artifacts
+        uses: actions/download-artifact@v1
+        with:
+          name: windows-arm64
 
-      - uses: actions/checkout@v2
-      - name: Update install script in S3
+      - name: Validate artifacts exist as expected - Windows
         run: |
-          sh ./scripts/generate-installer.sh ${{ needs.get-version.outputs.version }}
-          aws s3 cp scripts/install s3://cage-build-assets-${{ env.STAGE }}/cli/${{needs.get-version.outputs.version}}/install
-          aws s3 cp scripts/install s3://cage-build-assets-${{ env.STAGE }}/cli/install
-          aws s3 cp scripts/version s3://cage-build-assets-${{ env.STAGE }}/cli/${{needs.get-version.outputs.version}}/version
-          aws s3 cp scripts/version s3://cage-build-assets-${{ env.STAGE }}/cli/version
-          aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/cli/install"
-          aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/cli/version"
+          ls ./windows-x86
+          ls ./windows-arm64
+
+      - name: Validate artifacts exist as expected - Macos
+        run: |
+          ls ./macos-x86
+          ls ./macos-arm64
+
+      - name: Validate artifacts exist as expected - Linux
+        run: |
+          ls ./linux-x86
+          ls ./linux-arm64
+
+      # - name: Upload Windows CLI to S3
+      #   run: |
+      #     aws s3 cp ./windows-x86/ev-cage-${{ env.WINDOWS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.WINDOWS_TARGET }}/ev-cage.tar.gz
+      #     aws s3 cp ./windows-arm64/ev-cage-${{ env.WINDOWS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.WINDOWS_ARM_TARGET }}/ev-cage.tar.gz
+
+      # - name: Upload MacOS CLI to S3
+      #   run: |
+      #     aws s3 cp ./macos-x86/ev-cage-${{ env.MACOS_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.MACOS_TARGET }}/ev-cage.tar.gz
+      #     aws s3 cp ./macos-arm64/ev-cage-${{ env.MACOS_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.MACOS_ARM_TARGET }}/ev-cage.tar.gz
+
+      # - name: Upload Linux CLI to S3
+      #   run: |
+      #     aws s3 cp ./linux-x86/ev-cage-${{ env.LINUX_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.LINUX_TARGET }}/ev-cage.tar.gz
+      #     aws s3 cp ./linux-arm64/ev-cage-${{ env.LINUX_ARM_TARGET }}-${{ needs.get-version.outputs.version }}.tar.gz s3://cage-build-assets-${{ env.STAGE }}/cli/${{ needs.get-version.outputs.version }}/${{ env.LINUX_ARM_TARGET }}/ev-cage.tar.gz
+
+      # - uses: actions/checkout@v2
+      # - name: Update install script in S3
+      #   run: |
+      #     sh ./scripts/generate-installer.sh ${{ needs.get-version.outputs.version }}
+      #     aws s3 cp scripts/install s3://cage-build-assets-${{ env.STAGE }}/cli/${{needs.get-version.outputs.version}}/install
+      #     aws s3 cp scripts/install s3://cage-build-assets-${{ env.STAGE }}/cli/install
+      #     aws s3 cp scripts/version s3://cage-build-assets-${{ env.STAGE }}/cli/${{needs.get-version.outputs.version}}/version
+      #     aws s3 cp scripts/version s3://cage-build-assets-${{ env.STAGE }}/cli/version
+      #     aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/cli/install"
+      #     aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/cli/version"
